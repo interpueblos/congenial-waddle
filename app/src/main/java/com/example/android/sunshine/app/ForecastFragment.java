@@ -1,9 +1,7 @@
 package com.example.android.sunshine.app;
 
-import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
-import android.net.Uri;
 import android.os.AsyncTask;
 import android.os.Bundle;
 import android.preference.PreferenceManager;
@@ -19,22 +17,21 @@ import android.view.ViewGroup;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.ListView;
-import android.widget.Toast;
 
-import org.json.JSONArray;
-import org.json.JSONException;
-import org.json.JSONObject;
+import com.example.android.sunshine.app.API.WeatherAPI;
+import com.example.android.sunshine.app.model.Weathermodel;
 
 import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
-import java.net.URL;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
+
+import okhttp3.OkHttpClient;
+import retrofit2.Call;
+import retrofit2.Response;
+import retrofit2.Retrofit;
+import retrofit2.converter.gson.GsonConverterFactory;
 
 /**
  * A placeholder fragment containing a simple view.
@@ -81,6 +78,25 @@ public class ForecastFragment extends Fragment {
                 getString(R.string.pref_location_default));
 
         new FetchWeatherTask().execute(locationPref);
+    }
+
+    public String formatHighLows(double high, double low) {
+        SharedPreferences sharedPref = PreferenceManager.getDefaultSharedPreferences(getActivity());
+        String unitType = sharedPref.getString(getString(R.string.pref_units_key),
+                getString(R.string.pref_units_metric));
+
+        if (unitType.equals(getString(R.string.pref_units_imperial))) {
+            high = (high * 1.8) + 32;
+            low =  (low * 1.8) + 32;
+        } else if (!unitType.equals(getString(R.string.pref_units_metric))) {
+            Log.d(LOG_TAG, "Unit type not found: "+unitType);
+        }
+
+        long roundedHigh = Math.round(high);
+        long roundedLow = Math.round(low);
+
+        String highLowStr = roundedHigh + "/" + roundedLow;
+        return highLowStr;
     }
 
     @Override
@@ -130,17 +146,7 @@ public class ForecastFragment extends Fragment {
         return shortenedDateFormat.format(time);
     }
 
-    /**
-     * Prepare the weather high/lows for presentation.
-     */
-    private String formatHighLows(double high, double low) {
-        // For presentation, assume the user doesn't care about tenths of a degree.
-        long roundedHigh = Math.round(high);
-        long roundedLow = Math.round(low);
 
-        String highLowStr = roundedHigh + "/" + roundedLow;
-        return highLowStr;
-    }
 
     /**
      * Take the String representing the complete forecast in JSON Format and
@@ -149,19 +155,7 @@ public class ForecastFragment extends Fragment {
      * Fortunately parsing is easy:  constructor takes the JSON string and converts it
      * into an Object hierarchy for us.
      */
-    private String[] getWeatherDataFromJson(String forecastJsonStr, int numDays)
-            throws JSONException {
-
-        // These are the names of the JSON objects that need to be extracted.
-        final String OWM_LIST = "list";
-        final String OWM_WEATHER = "weather";
-        final String OWM_TEMPERATURE = "temp";
-        final String OWM_MAX = "max";
-        final String OWM_MIN = "min";
-        final String OWM_DESCRIPTION = "main";
-
-        JSONObject forecastJson = new JSONObject(forecastJsonStr);
-        JSONArray weatherArray = forecastJson.getJSONArray(OWM_LIST);
+    private String[] getWeatherDataFromJson(Weathermodel model, int numDays) {
 
         // OWM returns daily forecasts based upon the local time of the city that is being
         // asked for, which means that we need to know the GMT offset to translate this data
@@ -181,14 +175,12 @@ public class ForecastFragment extends Fragment {
         dayTime = new Time();
 
         String[] resultStrs = new String[numDays];
-        for(int i = 0; i < weatherArray.length(); i++) {
+
+        for(int i = 0; i < model.getList().size(); i++) {
             // For now, using the format "Day, description, hi/low"
             String day;
             String description;
             String highAndLow;
-
-            // Get the JSON object representing the day
-            JSONObject dayForecast = weatherArray.getJSONObject(i);
 
             // The date/time is returned as a long.  We need to convert that
             // into something human-readable, since most people won't read "1400356800" as
@@ -199,14 +191,12 @@ public class ForecastFragment extends Fragment {
             day = getReadableDateString(dateTime);
 
             // description is in a child array called "weather", which is 1 element long.
-            JSONObject weatherObject = dayForecast.getJSONArray(OWM_WEATHER).getJSONObject(0);
-            description = weatherObject.getString(OWM_DESCRIPTION);
+            description = model.getList().get(i).getWeather().get(0).getMain();
 
             // Temperatures are in a child object called "temp".  Try not to name variables
             // "temp" when working with temperature.  It confuses everybody.
-            JSONObject temperatureObject = dayForecast.getJSONObject(OWM_TEMPERATURE);
-            double high = temperatureObject.getDouble(OWM_MAX);
-            double low = temperatureObject.getDouble(OWM_MIN);
+            double high = model.getList().get(i).getTemp().getMax();
+            double low = model.getList().get(i).getTemp().getMin();
 
             highAndLow = formatHighLows(high, low);
             resultStrs[i] = day + " - " + description + " - " + highAndLow;
@@ -234,74 +224,39 @@ public class ForecastFragment extends Fragment {
             try {
                 // Construct the URL for the OpenWeatherMap query
                 // Possible parameters are avaiable at OWM's forecast API page, at
-                // http://openweathermap.org/API#forecast
-                String baseUrl = "http://api.openweathermap.org/data/2.5/forecast/daily?q=48360,es&mode=json&units=metric&cnt=7";
-                String apiKey= "&APPID=20a8a3aeedf174323b0870e07b7014cf";
 
-                Uri.Builder builder = new Uri.Builder();
-                builder.scheme("http").authority("api.openweathermap.org").appendPath("data")
-                        .appendPath("2.5").appendPath("forecast").appendPath("daily").appendQueryParameter("q",params[0])
-                        .appendQueryParameter("mode","json").appendQueryParameter("units","metric")
-                        .appendQueryParameter("cnt","7").appendQueryParameter("APPID","20a8a3aeedf174323b0870e07b7014cf");
-                String myUrl = builder.build().toString();
-                URL url = new URL(myUrl);
-                // Create the request to OpenWeatherMap, and open the connection
-                urlConnection = (HttpURLConnection) url.openConnection();
-                urlConnection.setRequestMethod("GET");
-                urlConnection.connect();
+                //Calling RETROFIT
+                /*******************************/
+                Weathermodel wmodel = new Weathermodel();
+                Retrofit retrofit = new Retrofit.Builder()
+                        .baseUrl("http://api.openweathermap.org/data/2.5/")
+                        .addConverterFactory(GsonConverterFactory.create())
+                        .client(new OkHttpClient.Builder().build()).build();
+                WeatherAPI api = retrofit.create(WeatherAPI.class);
 
-                // Read the input stream into a String
-                InputStream inputStream = urlConnection.getInputStream();
-                StringBuffer buffer = new StringBuffer();
-                if (inputStream == null) {
-                    // Nothing to do.
-                    return resultStrs;
+                //Now ,we need to call for response
+                //Retrofit using gson for JSON-POJO conversion
+
+                Call<Weathermodel> call = api.getWeatherForecast("48360,es","json","metric",7,"20a8a3aeedf174323b0870e07b7014cf");
+                Response<Weathermodel> response = call.execute();
+                if (response.isSuccessful()) {
+                    Weathermodel model = response.body();
+                    Log.d(LOG_TAG, "* * * MODEL:" + model.getCity().getName());
+                    return getWeatherDataFromJson(model, 7);
+                } else {
+                    Log.d(LOG_TAG, "ERROR");
+                    Log.d(LOG_TAG, "" + response.code());
                 }
-                reader = new BufferedReader(new InputStreamReader(inputStream));
-
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    // Since it's JSON, adding a newline isn't necessary (it won't affect parsing)
-                    // But it does make debugging a *lot* easier if you print out the completed
-                    // buffer for debugging.
-                    buffer.append(line + "\n");
-                }
-
-                if (buffer.length() == 0) {
-                    // Stream was empty.  No point in parsing.
-                    return resultStrs;
-                }
-                forecastJsonStr = buffer.toString();
+                /*****************************/
 
                 Log.v(LOG_TAG, "Forecast JSON String: " + forecastJsonStr);
-
+                return resultStrs;
             } catch (IOException e) {
-                Log.e("PlaceholderFragment", "Error ", e);
+                Log.e(LOG_TAG, "Error IO ", e);
                 // If the code didn't successfully get the weather data, there's no point in attemping
                 // to parse it.
                 return resultStrs;
             }
-            finally{
-                if (urlConnection != null) {
-                    urlConnection.disconnect();
-                }
-                if (reader != null) {
-                    try {
-                        reader.close();
-                    } catch (final IOException e) {
-                        Log.e(LOG_TAG, "Error closing stream", e);
-                    }
-                }
-            }
-            try {
-                return getWeatherDataFromJson(forecastJsonStr, 7);
-            } catch (JSONException jsone) {
-                Log.e(LOG_TAG, jsone.getMessage(), jsone);
-                // If the code didn't successfully get the weather data, there's no point in attemping
-                // to parse it.
-                return resultStrs;
-            }
-
         }
 
         @Override
